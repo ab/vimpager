@@ -1,6 +1,8 @@
 #!/bin/sh
 version_tag=2.06
 
+set -m
+
 # FIND REAL PARENT DIRECTORY
 link=$0
 
@@ -55,12 +57,6 @@ quit() {
 
         kill "$tail_pid" >/dev/null 2>&1
         do_sleep 100
-        if [ -f "${tmp_dir}/cat_pid" ]; then
-            cat_pid=$(cat "${tmp_dir}/cat_pid")
-            kill "$cat_pid" >/dev/null 2>&1
-            do_sleep 100
-            kill -9 "$cat_pid" >/dev/null 2>&1
-        fi
         kill -9 "$tail_pid" >/dev/null 2>&1
 
         cd "${tmp_dir%/*}" 2>/dev/null # some systems cannot remove CWD
@@ -135,16 +131,17 @@ start_highlight_job() {
         --cmd visual \
         ${extra_cmd:+--cmd "$extra_cmd"} \
         ${extra_c:+-c "$extra_c"} \
-        -c "call vimcat#Run(\"$dest_file\", ${line_numbers:-0}, \"$chunks_dir\", \"$pipeline_start\")"
+        -c "call vimcat#Run(\"/dev/stdout\", ${line_numbers:-0}, \"$chunks_dir\", \"$pipeline_start\")"
 
     [ -n "$vimcatrc" ] && set -- "$@" -u "$vimcatrc"
 
     if [ "${VIMCAT_DEBUG:-0}" -eq 0 ]; then
-        ("$vim" "$@" </dev/tty >/dev/null 2>&1; touch "$tmp_dir/vim_done") &
+        "$vim" "$@" -s </dev/tty 2>/dev/null >"$dest_file" &
         vim_pid=$!
     else
-        "$vim" "$@" </dev/tty
-        touch "$tmp_dir/vim_done"
+        "$vim" "$@" </dev/tty &
+        vim_pid=$!
+        echo "VIMCAT_DEBUG set, output went to terminal" > "$dest_file"
     fi
 }
 
@@ -371,12 +368,8 @@ do
                 stty tab0         2>/dev/null >/dev/tty
                 tabs -${tab_stop} 2>/dev/null >/dev/tty
             fi
-            while :; do
-                [ ! -z "$scroll_time" ] && sleep ${scroll_time}
-                cat "$out_fifo" & cat_pid=$!
-                echo ${cat_pid} > "${tmp_dir}/cat_pid"
-                wait ${cat_pid}
-            done
+            [ ! -z "$scroll_time" ] && sleep ${scroll_time}
+            cat "$out_fifo"
         ) &
         tail_pid=$!
     else
@@ -386,16 +379,15 @@ do
 
     start_highlight_job
     start_pipeline
-    while [ ! -f "$tmp_dir/vim_done" ]; do
-        do_sleep 50
-    done
 
-    if [ -n "$tail_pid" ]; then
-        # if it's not a fifo where this doesn't work, tail needs some time to catch up
-        [ ! -p "$out_fifo" ] && do_sleep 1100
-
-        kill $tail_pid >/dev/null 2>&1
-    fi
+    # Wait for vim and cat/tail to finish.
+    # For some reason, on Linux the `wait` builtin doesn't work for certain
+    # inputs when run as MANPAGER. It deadlocks waiting for a SIGCHLD that
+    # never comes, even though the child has already exited and is defunct.
+    # Using job control and fg avoids this problem by allowing the shell to
+    # correctly reap exited subprocesses.
+    fg >/dev/null
+    fg >/dev/null
 
     i=$((i + 1))
 done
